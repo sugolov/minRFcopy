@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
@@ -57,7 +59,7 @@ class LabelEmbedder(nn.Module):
     def token_drop(self, labels, force_drop_ids=None):
         if force_drop_ids is None:
             drop_ids = torch.rand(labels.shape[0]) < self.dropout_prob
-            drop_ids = drop_ids.cuda()
+            drop_ids = drop_ids.to(device)
             drop_ids = drop_ids.to(labels.device)
         else:
             drop_ids = force_drop_ids == 1

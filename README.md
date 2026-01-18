@@ -17,7 +17,7 @@ Everything is still self-contained, minimal, and hopefully easy to hack. There i
 Install torch, pil, torchvision
 
 ```
-pip install torch torchvision pillow tqdm
+pip install torch torchvision torchmetrics torch-fidelity pillow tqdm wandb
 ```
 
 Run

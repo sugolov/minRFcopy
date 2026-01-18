@@ -2,7 +2,18 @@
 import argparse
 
 import torch
+import torchmetrics
+import numpy as np
+import torch.optim as optim
+from PIL import Image
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from torchvision.utils import make_grid
+from tqdm import tqdm
 
+import wandb
+
+from dit import DiT_Llama
 from smoothing import smooth
 
 class RF:
@@ -44,6 +55,51 @@ class RF:
             z = z - dt * vc
             images.append(z)
         return images
+    
+@torch.no_grad()
+def compute_fid(rf, dataset, args, device, channels):
+    from torchmetrics.image.fid import FrechetInceptionDistance
+    
+    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    
+    # add real images
+    print("Processing real images...")
+    real_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    n_real = 0
+    for x, _ in tqdm(real_loader):
+        x = x.to(device)
+        # unnormalize and convert to [0,1]
+        x = x * 0.5 + 0.5
+        x = x.clamp(0, 1)
+        # FID expects RGB, repeat channels if grayscale
+        if channels == 1:
+            x = x.repeat(1, 3, 1, 1)
+        fid.update(x, real=True)
+        n_real += x.size(0)
+        if n_real >= args.num_samples:
+            break
+    
+    # generate fake images
+    print("Generating samples...")
+    n_fake = 0
+    while n_fake < args.num_samples:
+        batch_size = min(args.batch_size, args.num_samples - n_fake)
+        cond = torch.randint(0, 10, (batch_size,)).to(device)
+        uncond = torch.ones_like(cond) * 10
+        init_noise = torch.randn(batch_size, channels, 32, 32).to(device)
+        
+        images = rf.sample(init_noise, cond, uncond, sample_steps=args.sample_steps, cfg=args.cfg)
+        x = images[-1]
+        x = x * 0.5 + 0.5
+        x = x.clamp(0, 1)
+        if channels == 1:
+            x = x.repeat(1, 3, 1, 1)
+        fid.update(x, real=False)
+        n_fake += batch_size
+        print(f"Generated {n_fake}/{args.num_samples}")
+    
+    score = fid.compute().item()
+    return score
 
 def get_run_name(args):
     if args.smooth == 'none':
@@ -58,16 +114,6 @@ def get_run_name(args):
     return name
 
 if __name__ == "__main__":
-    import numpy as np
-    import torch.optim as optim
-    from PIL import Image
-    from torch.utils.data import DataLoader
-    from torchvision import datasets, transforms
-    from torchvision.utils import make_grid
-    from tqdm import tqdm
-
-    import wandb
-    from dit import DiT_Llama
 
     parser = argparse.ArgumentParser(description="Train Rectified Flow")
     # dataset
@@ -78,6 +124,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--device", type=str, default="cuda")
+    # eval
+    parser.add_argument("--eval", action="store_true", help="Run FID evaluation")
+    parser.add_argument("--ckpt", type=str, default=None, help="Checkpoint path for eval")
+    parser.add_argument("--num_samples", type=int, default=10000, help="Number of samples for FID")
+    parser.add_argument("--fid_every", type=int, default=0, help="Compute FID every N epochs (0 to disable)")
     # model
     parser.add_argument("--dim", type=int, default=None, help="Model dim (default: 256 for CIFAR, 64 for MNIST)")
     parser.add_argument("--n_layers", type=int, default=None, help="Number of layers (default: 10 for CIFAR, 6 for MNIST)")
@@ -104,6 +156,8 @@ if __name__ == "__main__":
     # output
     parser.add_argument("--output_dir", type=str, default="contents")
     args = parser.parse_args()
+
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     if args.seed is not None:
         torch.manual_seed(args.seed)
@@ -135,7 +189,7 @@ if __name__ == "__main__":
         n_layers = args.n_layers or 6
         n_heads = args.n_heads or 4
 
-    model = DiT_Llama(channels, 32, dim=dim, n_layers=n_layers, n_heads=n_heads, num_classes=10).cuda()
+    model = DiT_Llama(channels, 32, dim=dim, n_layers=n_layers, n_heads=n_heads, num_classes=10).to(device)
     model_size = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of parameters: {model_size}, {model_size / 1e6}M")
 
@@ -147,6 +201,14 @@ if __name__ == "__main__":
 
     import os
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.eval:
+        if args.ckpt:
+            model.load_state_dict(torch.load(args.ckpt, map_location=device))
+        model.eval()
+        fid_score = compute_fid(rf, dataset, args, device, channels)
+        print(f"FID: {fid_score:.2f}")
+        exit()
 
     if not args.no_wandb:
         wandb_project = args.wandb_project or f"rf_{dataset_name}"
@@ -162,7 +224,7 @@ if __name__ == "__main__":
         lossbin = {i: 0 for i in range(10)}
         losscnt = {i: 1e-6 for i in range(10)}
         for i, (x, c) in tqdm(enumerate(dataloader), total=len(dataloader)):
-            x, c = x.cuda(), c.cuda()
+            x, c = x.to(device), c.to(device)
             optimizer.zero_grad()
             loss, blsct = rf.forward(x, c)
             loss.backward()
@@ -190,10 +252,10 @@ if __name__ == "__main__":
 
         rf.model.eval()
         with torch.no_grad():
-            cond = torch.arange(0, 16).cuda() % 10
+            cond = torch.arange(0, 16).to(device) % 10
             uncond = torch.ones_like(cond) * 10
 
-            init_noise = torch.randn(16, channels, 32, 32).cuda()
+            init_noise = torch.randn(16, channels, 32, 32).to(device)
             images = rf.sample(init_noise, cond, uncond, sample_steps=args.sample_steps, cfg=args.cfg)
             
             gif = []
@@ -213,5 +275,17 @@ if __name__ == "__main__":
                 loop=0,
             )
             gif[-1].save(f"{args.output_dir}/sample_{epoch}_last.png")
+
+        gif[-1].save(f"{args.output_dir}/sample_{epoch}_last.png")
+
+        # checkpoint
+        torch.save(model.state_dict(), f"{args.output_dir}/model_{epoch}.pt")
+
+        # FID
+        if args.fid_every > 0 and (epoch + 1) % args.fid_every == 0:
+            fid_score = compute_fid(rf, dataset, args, device, channels)
+            print(f"Epoch {epoch} FID: {fid_score:.2f}")
+            if not args.no_wandb:
+                wandb.log({"fid": fid_score})
 
         rf.model.train()
