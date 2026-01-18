@@ -17,4 +17,5 @@ CUDA_VISIBLE_DEVICES=$GPU python rf.py \
     --wandb_entity hmeng-university-of-toronto \
     --wandb_project minRF \
     --fid_every 5 \
+    --num_workers 2 \
     --seed 42
