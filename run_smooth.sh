@@ -5,6 +5,7 @@ GPU=${1:-0}
 source .venv/bin/activate
 CUDA_VISIBLE_DEVICES=$GPU python rf.py \
     --cifar \
+    --datadir ~/anton/data \
     --smooth=window \
     --smooth_rho=0.3 \
     --smooth_proj \
