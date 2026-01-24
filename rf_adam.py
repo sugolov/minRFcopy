@@ -14,7 +14,7 @@ from tqdm import tqdm
 import wandb
 
 from dit import DiT_Llama
-from smoothing import smooth
+from smooth_adam import smoother, post_adam_smoother
 
 class RF:
     def __init__(self, model, ln=True):
@@ -111,6 +111,10 @@ def get_run_name(args):
     
     if args.smooth_proj:
         name += "-proj"
+    if args.smooth_post_adam:
+        name += "-adam"
+    if args.smooth_normalize != "none":
+        name += "-norm"
     return name
 
 if __name__ == "__main__":
@@ -148,6 +152,8 @@ if __name__ == "__main__":
     # smoothing
     # smoothing
     parser.add_argument("--smooth", default="none", choices=["none", "window", "laplacian", "ema"])
+    parser.add_argument("--smooth_post_adam", action="store_true", help="Apply smoothing post-Adam (on updates) instead of pre-Adam (on gradients)")
+    parser.add_argument("--smooth_normalize", default="none", choices=["none", "rescale", "normalize_before"])
     parser.add_argument("--smooth_alpha", type=float, default=0.5)
     parser.add_argument("--smooth_rho", type=float, default=0.5)
     parser.add_argument("--smooth_rev", type=int, default=1)
@@ -230,12 +236,33 @@ if __name__ == "__main__":
             loss.backward()
 
             if args.smooth != "none":
-                smooth(model.layers, method=args.smooth,
-                    alpha=args.smooth_alpha, rho=args.smooth_rho,
-                    reverse=bool(args.smooth_rev), proj_only=args.smooth_proj,
-                    fused=args.smooth_fused)
+                if args.smooth_post_adam:
+                    # post_adam_smoother handles optimizer.step() internally
+                    post_adam_smoother(
+                        model.layers, optimizer,
+                        method=args.smooth,
+                        alpha=args.smooth_alpha,
+                        rho=args.smooth_rho,
+                        reverse=bool(args.smooth_rev),
+                        proj_only=args.smooth_proj,
+                        normalize=args.smooth_normalize,
+                    )
+                else:
+                    # Pre-Adam: smooth gradients, then step
+                    smoother(
+                        model.layers,
+                        method=args.smooth,
+                        alpha=args.smooth_alpha,
+                        rho=args.smooth_rho,
+                        reverse=bool(args.smooth_rev),
+                        proj_only=args.smooth_proj,
+                        normalize=args.smooth_normalize,
+                    )
+                    optimizer.step()
+            else:
+                optimizer.step()
 
-            optimizer.step()
+            #optimizer.step()
 
             if not args.no_wandb:
                 wandb.log({"loss": loss.item()})
