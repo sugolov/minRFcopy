@@ -114,7 +114,7 @@ def get_run_name(args):
     if args.smooth_post_adam:
         name += "-adam"
     if args.smooth_normalize != "none":
-        name += "-norm"
+        name += f"-{args.smooth_normalize}"
     return name
 
 if __name__ == "__main__":
