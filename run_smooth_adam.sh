@@ -7,6 +7,7 @@ RHO=${4:-0.5}
 source .venv/bin/activate
 CUDA_VISIBLE_DEVICES=$GPU python rf_adam.py \
     --smooth_post_adam \
+    --smooth_normalize normalize_before \
     --cifar \
     --smooth $METHOD \
     --smooth_alpha $ALPHA \
